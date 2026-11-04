@@ -25,13 +25,14 @@ func distributor(p Params, c distributorChannels) {
 	next := makeWorld(p.ImageHeight, p.ImageWidth) //creates world to write next state to
 
 	turn := 0
-	c.events <- StateChange{turn, Executing}
 
-	initial := calculateAliveCells(p, world) //calculates intial number of cells alive
+	initial := calculateAliveCells(p, world) //calculates initial cells alive
 	if len(initial) > 0 {
-		c.events <- CellsFlipped{CompletedTurns: turn, Cells: initial}
+		c.events <- CellsFlipped{CompletedTurns: turn, Cells: initial} //sends initial cells alive
 	}
 	aliveCount := len(initial)
+
+	c.events <- StateChange{turn, Executing}
 
 	jobs := make([]chan job, p.Threads)   //creates slots for channels according to the number of threads
 	out := make([]chan result, p.Threads) //creates slots for results channels
@@ -52,7 +53,7 @@ func distributor(p Params, c distributorChannels) {
 	for turn < p.Turns && !quit {
 
 		select {
-		case <-ticker.C: //sends AliceCellsCount when appropriate
+		case <-ticker.C: //sends AliveCellsCount when appropriate
 			c.events <- AliveCellsCount{CompletedTurns: turn, CellsCount: aliveCount}
 		case key := <-c.keyPresses:
 			quit = handleKey(key, p, c, world, turn) //handles key presses
@@ -64,34 +65,37 @@ func distributor(p Params, c distributorChannels) {
 
 		for _, j := range jobs {
 			j <- job{world: world, newWorld: next} //goes through each turn (one iteration of the for loop
-		} //sends the given worker its next turn and the next iteration
-		total := 0 //immediately sends the next worker its task
+		} //sends the given worker its next turn and the next iteration immediately sends the next worker its task
+		total := 0
 		for i := range out {
-			r := <-out[i]    //same process but sends results
-			total += r.alive //counts alive cells strip by strip
+			r := <-out[i]           //same process but sends results
+			total += r.alive        //counts alive cells strip by strip
+			if len(r.flipped) > 0 { //checks which cells are flipped and sends it to sdl
+				c.events <- CellsFlipped{CompletedTurns: turn + 1, Cells: r.flipped}
+			}
 		}
 
 		world, next = next, world //swaps worlds so there's no need to create a fresh world each time
 		turn++
 		aliveCount = total
+		c.events <- TurnComplete{CompletedTurns: turn}
 	}
 
 	// TODO: Report the final state using FinalTurnCompleteEvent.
+
+	c.events <- FinalTurnComplete{CompletedTurns: turn, Alive: calculateAliveCells(p, world)}
 
 	// Make sure that the Io has finished any output before exiting.
 	c.ioCommand <- ioCheckIdle
 	<-c.ioIdle
 
-	c.events <- StateChange{turn, Quitting}
-
-	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
-	for _, j := range jobs {
-		close(j) //closes job channels
-	}
-
 	saveWorld(p, c, world, turn)
 
 	c.events <- StateChange{turn, Quitting}
+
+	for _, j := range jobs {
+		close(j) //closes job channels
+	}
 
 	close(c.events)
 }
